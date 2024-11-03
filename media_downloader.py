@@ -3,6 +3,8 @@ import asyncio
 import logging
 import os
 from typing import List, Optional, Tuple, Union
+import subprocess
+import logging
 
 import pyrogram
 import yaml
@@ -352,6 +354,35 @@ async def begin_import(config: dict, pagination_limit: int) -> dict:
     config["last_read_message_id"] = last_read_message_id
     return config
 
+logger = logging.getLogger("media_downloader")
+
+def call_constrect():
+    """Call the constrect script after all processing is complete."""
+    try:
+        # Start the subprocess and capture output
+        process = subprocess.Popen(
+            ["python", "constrect.py"], 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE, 
+            text=True
+        )
+        
+        # Stream output in real-time
+        for line in process.stdout:
+            logger.info(line.strip())
+        
+        # Wait for the process to complete and capture errors
+        stdout, stderr = process.communicate()
+        
+        if process.returncode == 0:
+            logger.info("Successfully called constrect script.")
+        else:
+            logger.error("Constrect script failed with error:\n%s", stderr.strip())
+    
+    except Exception as e:
+        logger.error("An error occurred while calling constrect script: %s", e)
+
+
 
 def main():
     """Main function of the downloader."""
@@ -369,7 +400,9 @@ def main():
         )
     update_config(updated_config)
     check_for_updates()
-
+    
+    # Call the constrect script
+    call_constrect()
 
 if __name__ == "__main__":
     print_meta(logger)
