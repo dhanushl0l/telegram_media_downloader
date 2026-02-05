@@ -5,6 +5,7 @@ import logging
 import os
 from datetime import date, datetime, timezone
 from typing import List, Optional, Tuple, Union
+import re
 
 import yaml
 from rich.logging import RichHandler
@@ -21,7 +22,7 @@ from tqdm import tqdm
 
 from utils.file_management import get_next_name, manage_duplicate_file
 from utils.log import LogFilter
-from utils.meta import APP_VERSION, DEVICE_MODEL, LANG_CODE, SYSTEM_VERSION, print_meta
+from utils.meta import APP_VERSION, DEVICE_MODEL, LANG_CODE, SYSTEM_VERSION
 from utils.updates import check_for_updates
 
 logging.basicConfig(
@@ -146,7 +147,6 @@ async def _get_media_meta(
     elif _type == "photo":
         file_format = "jpg"
 
-    # Determine base directory for downloads
     base_dir = download_directory if download_directory else THIS_DIR
 
     if _type in ["voice", "video_note"]:
@@ -199,7 +199,7 @@ def get_media_type(message: Message) -> Optional[str]:
     return None
 
 
-async def download_media(  # pylint: disable=too-many-locals
+async def download_media(
     client: TelegramClient,
     message: Message,
     media_types: List[str],
@@ -253,21 +253,36 @@ async def download_media(  # pylint: disable=too-many-locals
                 media_obj, _type, download_directory
             )
             if _can_download(_type, file_formats, file_format):
-                # Create progress bar for download
                 file_size = getattr(media_obj, "size", 0)
-                # Use original file name if available, otherwise generated name
                 display_name = getattr(
                     media_obj, "file_name", os.path.basename(file_name)
                 )
                 desc = f"Downloading {display_name}"
                 logger.info(desc)
+                caption = (message.text or "").strip()
+                if caption and message.date:
+                    text = caption.replace("\n", " ")
+                    text = re.sub(r'[\\/:*?"<>|]', "", text)
+
+                    date_str = message.date.strftime("%d-%m-%Y")
+
+                    split_match = re.split(rf"\b{date_str}\b", text, maxsplit=1)
+                    series_name = split_match[0].strip()
+
+                    _, ext = os.path.splitext(file_name)
+                    final_name = f"{series_name}-{date_str}{ext}"
+
+                    base_dir = os.path.dirname(file_name)
+                    series_dir = os.path.join(base_dir, series_name)
+                    os.makedirs(series_dir, exist_ok=True)
+
+                    file_name = os.path.join(series_dir, final_name)
 
                 if _is_exist(file_name):
                     file_name = get_next_name(file_name)
                     with tqdm(
                         total=file_size, unit="B", unit_scale=True, desc=desc
                     ) as pbar:
-                        # pylint: disable=cell-var-from-loop
                         download_path = await client.download_media(
                             message,
                             file=file_name,
@@ -275,14 +290,11 @@ async def download_media(  # pylint: disable=too-many-locals
                                 c, t, pbar
                             ),
                         )
-                        download_path = manage_duplicate_file(
-                            download_path
-                        )  # type: ignore
+                        download_path = manage_duplicate_file(download_path)
                 else:
                     with tqdm(
                         total=file_size, unit="B", unit_scale=True, desc=desc
                     ) as pbar:
-                        # pylint: disable=cell-var-from-loop
                         download_path = await client.download_media(
                             message,
                             file=file_name,
@@ -340,51 +352,28 @@ async def process_messages(
     file_formats: dict,
     download_directory: Optional[str] = None,
 ) -> int:
-    """
-    Download media from Telegram.
-
-    Parameters
-    ----------
-    client: TelegramClient
-        Client to interact with Telegram APIs.
-    messages: list
-        List of telegram messages.
-    media_types: list
-        List of strings of media types to be downloaded.
-        Ex : `["audio", "photo"]`
-        Supported formats:
-            * audio
-            * document
-            * photo
-            * video
-            * video_note
-            * voice
-    file_formats: dict
-        Dictionary containing the list of file_formats
-        to be downloaded for `audio`, `document` & `video`
-        media types.
-    download_directory: Optional[str]
-        Custom directory path for downloads. If None, uses default structure.
-
-    Returns
-    -------
-    int
-        Max value of list of message ids.
-    """
-    message_ids = await asyncio.gather(
-        *[
-            download_media(
+    last_message_id = 0
+    
+    semaphore = asyncio.Semaphore(3)
+    
+    async def bounded_download(message):
+        async with semaphore:
+            return await download_media(
                 client, message, media_types, file_formats, download_directory
             )
-            for message in messages
-        ]
-    )
+    
+    tasks = [bounded_download(msg) for msg in messages]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    for result in results:
+        if isinstance(result, int):
+            last_message_id = max(last_message_id, result)
+    
     logger.info("Processed batch of %d messages", len(messages))
-    last_message_id: int = max(message_ids)
     return last_message_id
 
 
-async def begin_import(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+async def begin_import(
     config: dict, pagination_limit: int
 ) -> dict:
     """
@@ -425,8 +414,11 @@ async def begin_import(  # pylint: disable=too-many-locals,too-many-branches,too
         system_version=SYSTEM_VERSION,
         app_version=APP_VERSION,
         lang_code=LANG_CODE,
+        connection_retries=5,
+        retry_delay=1,
     )
     await client.start()
+    
     last_read_message_id: int = config["last_read_message_id"]
     start_date_val = config.get("start_date")
     if isinstance(start_date_val, str) and start_date_val.strip():
@@ -463,10 +455,8 @@ async def begin_import(  # pylint: disable=too-many-locals,too-many-branches,too
     download_directory_val = config.get("download_directory")
     if isinstance(download_directory_val, str) and download_directory_val.strip():
         download_directory = download_directory_val.strip()
-        # Convert to absolute path if relative
         if not os.path.isabs(download_directory):
             download_directory = os.path.abspath(download_directory)
-        # Create directory if it doesn't exist
         os.makedirs(download_directory, exist_ok=True)
         logger.info("Custom download directory: %s", download_directory)
     else:
@@ -479,14 +469,14 @@ async def begin_import(  # pylint: disable=too-many-locals,too-many-branches,too
     pagination_count: int = 0
     if config["ids_to_retry"]:
         logger.info("Downloading files failed during last run...")
-        skipped_messages: list = await client.get_messages(  # type: ignore
+        skipped_messages: list = await client.get_messages(
             config["chat_id"], ids=config["ids_to_retry"]
         )
         for message in skipped_messages:
             pagination_count += 1
             messages_list.append(message)
 
-    async for message in messages_iter:  # type: ignore
+    async for message in messages_iter:
         if end_date and message.date > end_date:
             continue
         if start_date and message.date < start_date:
@@ -523,13 +513,12 @@ async def begin_import(  # pylint: disable=too-many-locals,too-many-branches,too
     return config
 
 
-def main():
-    """Main function of the downloader."""
+async def start():
     with open(os.path.join(THIS_DIR, "config.yaml")) as f:
         config = yaml.safe_load(f)
-    updated_config = asyncio.get_event_loop().run_until_complete(
-        begin_import(config, pagination_limit=100)
-    )
+
+    updated_config = await begin_import(config, pagination_limit=100)
+
     if FAILED_IDS:
         logger.info(
             "Downloading of %d files failed. "
@@ -537,10 +526,6 @@ def main():
             "These files will be downloaded on the next run.",
             len(set(FAILED_IDS)),
         )
+
     update_config(updated_config)
     check_for_updates()
-
-
-if __name__ == "__main__":
-    print_meta(logger)
-    main()
