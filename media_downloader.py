@@ -7,6 +7,7 @@ import random
 import re
 from datetime import date, datetime, timezone
 from typing import List, Optional, Tuple, Union
+import re
 
 from rich.logging import RichHandler
 from telethon import TelegramClient
@@ -24,7 +25,7 @@ import config_manager
 import db
 from utils.file_management import get_next_name, manage_duplicate_file
 from utils.log import LogFilter
-from utils.meta import APP_VERSION, DEVICE_MODEL, LANG_CODE, SYSTEM_VERSION, print_meta
+from utils.meta import APP_VERSION, DEVICE_MODEL, LANG_CODE, SYSTEM_VERSION
 from utils.updates import check_for_updates
 
 logging.basicConfig(
@@ -295,6 +296,24 @@ async def download_media(  # pylint: disable=too-many-locals,too-many-branches,t
                 )
                 desc = f"Downloading {display_name}"
                 logger.info(desc)
+                caption = (message.text or "").strip()
+                if caption and message.date:
+                    text = caption.replace("\n", " ")
+                    text = re.sub(r'[\\/:*?"<>|]', "", text)
+
+                    date_str = message.date.strftime("%d-%m-%Y")
+
+                    split_match = re.split(rf"\b{date_str}\b", text, maxsplit=1)
+                    series_name = split_match[0].strip()
+
+                    _, ext = os.path.splitext(file_name)
+                    final_name = f"{series_name}-{date_str}{ext}"
+
+                    base_dir = os.path.dirname(file_name)
+                    series_dir = os.path.join(base_dir, series_name)
+                    os.makedirs(series_dir, exist_ok=True)
+
+                    file_name = os.path.join(series_dir, final_name)
 
                 if _is_exist(file_name):
                     file_name = get_next_name(file_name)
@@ -308,9 +327,7 @@ async def download_media(  # pylint: disable=too-many-locals,too-many-branches,t
                                 c, t, pbar
                             ),
                         )
-                        download_path = manage_duplicate_file(
-                            download_path
-                        )  # type: ignore
+                        download_path = manage_duplicate_file(download_path)
                 else:
                     with tqdm(
                         total=file_size, unit="B", unit_scale=True, desc=desc
@@ -690,6 +707,8 @@ async def begin_import(  # pylint: disable=too-many-locals,too-many-branches,too
         system_version=SYSTEM_VERSION,
         app_version=APP_VERSION,
         lang_code=LANG_CODE,
+        connection_retries=5,
+        retry_delay=1,
     )
     await client.start()
 
@@ -778,10 +797,6 @@ def main():
             "These files will be downloaded on the next run.",
             total_failures,
         )
+
     update_config(updated_config)
     check_for_updates()
-
-
-if __name__ == "__main__":
-    print_meta(logger)
-    main()
