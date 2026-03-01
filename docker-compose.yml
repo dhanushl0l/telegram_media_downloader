@@ -11,6 +11,8 @@ services:
       - ./video:/app/video
       - ./config.yaml:/app/config.yaml
       - ./media_downloader.session:/app/media_downloader.session
+    ports:
+      - "8080:8080"
     stdin_open: true
     tty: true
     logging:
