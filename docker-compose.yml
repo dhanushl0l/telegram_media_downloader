@@ -1,0 +1,20 @@
+services:
+  media-downloader:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telegram-media-downloader
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Kolkata
+    volumes:
+      - ./video:/app/video
+      - ./config.yaml:/app/config.yaml
+      - ./media_downloader.session:/app/media_downloader.session
+    stdin_open: true
+    tty: true
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
